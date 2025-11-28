@@ -1,7 +1,33 @@
 use std::{
-    io::{Read, Write},
+    io::{Read, Write, stdin},
     net::{self, TcpListener, TcpStream},
 };
+
+fn handle_commands(mut stream: TcpStream){
+    let start_sequence = [0xAB, 0xCD, 0xEF, 0x01];
+    let end_sequence = [0xDE, 0xAD, 0xBE, 0xEF];
+    let mut buf = String::new();
+    loop {
+        print!(">");std::io::stdout().flush().unwrap();
+        let std_in = stdin();
+        let _ = std_in.read_line(&mut buf);
+        let mut msg = [0;4096];
+        msg[0..4].copy_from_slice(&start_sequence);
+        msg[4] = (buf.len() as u16).to_be_bytes()[0];
+        msg[5] = (buf.len() as u16).to_be_bytes()[1];
+        msg[6] = 0x2;
+        let length = buf.len();
+        let payload_end = 7+length;
+        let end_end = payload_end+4;
+        msg[7..payload_end].copy_from_slice(buf.as_bytes());
+        msg[payload_end..end_end].copy_from_slice(&end_sequence);
+
+        let _ = stream.write_all(&msg[0..end_end]);
+        _ = stream.flush();
+        buf.clear();
+        
+    }
+}
 
 fn handle_connection(mut stream: TcpStream) {
     let mut length: u16 = 0;
@@ -38,43 +64,68 @@ fn handle_connection(mut stream: TcpStream) {
             stream.flush().unwrap();
             let payload_end = 6 + length as usize;
             let payload = &message[6..payload_end];
-            if ![0x1,0x2,0x3,0x4].contains(&payload[0]){
+            if ![0x1, 0x3].contains(&payload[0]) {
                 message.clear();
                 continue;
             }
             match &payload[0] {
-                0x1=>{
-                    let mut response: [u8; 13] = [0;13];
+                0x1 => {
+                    let payload = b"pong"; // 4 bytes
+                    let len_bytes = (payload.len() as u16).to_be_bytes();
+
+                    let mut response: [u8; 14] = [0; 14];
+
+                    // start
                     response[0..4].copy_from_slice(&start_sequence);
-                    response[4] = 0x1;
-                    response[5..9].copy_from_slice("pong".as_bytes());
-                    response[9..13].copy_from_slice(&end_sequence);
-                    _ = stream.write_all(&response);
+
+                    // length
+                    response[4] = len_bytes[0];
+                    response[5] = len_bytes[1];
+
+                    // payload
+                    response[6..10].copy_from_slice(payload);
+
+                    // end
+                    response[10..14].copy_from_slice(&end_sequence);
+
+                    stream.write_all(&response).unwrap();
                     stream.flush().unwrap();
                     message.clear();
                 }
 
+                0x3 => {
+                    stream.shutdown(net::Shutdown::Both).expect("Shutdown signal sent, Stream closed");
+                }
 
-                _=>{
+                0x2 => {
+                    
+                }
+
+                _ => {
                     continue;
                 }
             }
         }
     }
 }
-
 fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:80")?;
+
     for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                handle_connection(stream);
-            }
-            Err(e) => {
-                println!("Connection failed {e}")
-            }
-        }
+        let stream = stream?;
+        let reader = stream.try_clone()?; // for receiving
+        let writer = stream.try_clone()?; // for sending
+
+        // Thread 1: packet parser (your handle_connection)
+        std::thread::spawn(move || {
+            handle_connection(reader);
+        });
+
+        // Thread 2: user input -> push packet to client
+        std::thread::spawn(move || {
+            handle_commands(writer);
+        });
     }
 
-    return Ok(());
+    Ok(())
 }
