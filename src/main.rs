@@ -1,20 +1,48 @@
 use std::{
     io::{Read, Write, stdin},
     net::{self, TcpListener, TcpStream},
+    sync::{Arc, atomic::{AtomicBool, Ordering}},
+    
 };
 
-fn handle_commands(mut stream: TcpStream){
+// This program implements a simple TCP-based command and control agent.
+// The server listens on port 80 and handles incoming connections.
+// Each connection spawns two threads:
+// 1. One to handle incoming packets from the client (handle_connection)
+// 2. One to read user input and send commands to the client (handle_commands)
+//
+// Packet format:
+// - Start sequence: [0xAB, 0xCD, 0xEF, 0x01] (4 bytes)
+// - Length: 2 bytes (big-endian u16)
+// - Payload: variable length
+// - End sequence: [0xDE, 0xAD, 0xBE, 0xEF] (4 bytes)
+//
+// Opcodes:
+// - 0x1: Ping request, responds with "pong"
+// - 0x2: Print data to stdout
+// - 0x3: Shutdown connection
+
+fn handle_commands(mut stream: TcpStream, running: Arc<AtomicBool>) {
+    // This function reads commands from stdin and sends them as packets to the connected client.
+    // It constructs packets with opcode 0x2 (print command) and sends them over the stream.
     let start_sequence = [0xAB, 0xCD, 0xEF, 0x01];
     let end_sequence = [0xDE, 0xAD, 0xBE, 0xEF];
     let mut buf = String::new();
-    loop {
+
+    while running.load(Ordering::SeqCst) {
+        
         print!(">");std::io::stdout().flush().unwrap();
         let std_in = stdin();
         let _ = std_in.read_line(&mut buf);
         let mut msg = [0;4096];
+        if buf.trim() == "cybxzpor" {
+            running.store(false, Ordering::SeqCst);
+            stream.shutdown(net::Shutdown::Both).expect("Stream shutdown by you");
+            break;
+        }
         msg[0..4].copy_from_slice(&start_sequence);
-        msg[4] = (buf.len() as u16).to_be_bytes()[0];
-        msg[5] = (buf.len() as u16).to_be_bytes()[1];
+        msg[4] = (buf.trim_end().len() as u16).to_be_bytes()[0];
+        msg[5] = (buf.trim_end().len() as u16).to_be_bytes()[1];
         msg[6] = 0x2;
         let length = buf.len();
         let payload_end = 7+length;
@@ -29,7 +57,13 @@ fn handle_commands(mut stream: TcpStream){
     }
 }
 
-fn handle_connection(mut stream: TcpStream) {
+fn handle_connection(mut stream: TcpStream, running: Arc<AtomicBool>) {
+    // This function handles incoming packets from the client.
+    // It parses the packet format, validates sequences, and processes opcodes.
+    // For opcode 0x1 (ping), it responds with "pong".
+    // For opcode 0x2 (print), it outputs the data to stdout.
+    // For opcode 0x3 (shutdown), it closes the connection.
+    
     let mut length: u16 = 0;
     let mut message = Vec::new();
     let start_len = 4;
@@ -43,6 +77,7 @@ fn handle_connection(mut stream: TcpStream) {
             stream
                 .shutdown(net::Shutdown::Both)
                 .expect("Stream abruptly shutdown by server");
+            running.store(false, Ordering::SeqCst);
             break;
         }
         message.extend_from_slice(&buf[0..read]);
@@ -64,12 +99,16 @@ fn handle_connection(mut stream: TcpStream) {
             stream.flush().unwrap();
             let payload_end = 6 + length as usize;
             let payload = &message[6..payload_end];
-            if ![0x1, 0x3].contains(&payload[0]) {
+            let opcode = payload[0];
+            let data = &payload[1..];
+
+            if ![0x1, 0x2, 0x3].contains(&payload[0]) {
                 message.clear();
                 continue;
             }
-            match &payload[0] {
+            match &opcode {
                 0x1 => {
+                    // Ping response
                     let payload = b"pong"; // 4 bytes
                     let len_bytes = (payload.len() as u16).to_be_bytes();
 
@@ -94,11 +133,16 @@ fn handle_connection(mut stream: TcpStream) {
                 }
 
                 0x3 => {
+                    // Shutdown command
                     stream.shutdown(net::Shutdown::Both).expect("Shutdown signal sent, Stream closed");
                 }
 
                 0x2 => {
-                    
+                    // Print command
+                    std::io::stdout().write_all(&data).unwrap();
+                    std::io::stdout().flush().unwrap();
+                    print!(">");std::io::stdout().flush().unwrap();
+
                 }
 
                 _ => {
@@ -109,21 +153,37 @@ fn handle_connection(mut stream: TcpStream) {
     }
 }
 fn main() -> std::io::Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:80")?;
+    // Main function: Sets up a TCP listener on 127.0.0.1:80.
+    // For each incoming connection, it spawns two threads:
+    // - One for handling incoming packets (handle_connection)
+    // - One for sending user commands (handle_commands)
+    let listener = TcpListener::bind("127.0.0.1:8080")?;
 
     for stream in listener.incoming() {
+        
         let stream = stream?;
+        let running = Arc::new(AtomicBool::new(true));
         let reader = stream.try_clone()?; // for receiving
         let writer = stream.try_clone()?; // for sending
+        println!("New connection from {}", stream.peer_addr()?);
 
+        let mut buf = String::new();
+        let std_in = stdin();
+        let _ = std_in.read_line(&mut buf);
+        if buf.trim() == "0" {
+            stream.shutdown(net::Shutdown::Both).expect("Stream rejected by you");
+            continue;
+        }
+
+        let running_clone = running.clone();    
         // Thread 1: packet parser (your handle_connection)
         std::thread::spawn(move || {
-            handle_connection(reader);
+            handle_connection(reader, running);
         });
 
         // Thread 2: user input -> push packet to client
         std::thread::spawn(move || {
-            handle_commands(writer);
+            handle_commands(writer, running_clone);
         });
     }
 
