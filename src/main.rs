@@ -44,10 +44,10 @@ fn handle_commands(mut stream: TcpStream, running: Arc<AtomicBool>) {
         msg[4] = (buf.trim_end().len() as u16).to_be_bytes()[0];
         msg[5] = (buf.trim_end().len() as u16).to_be_bytes()[1];
         msg[6] = 0x2;
-        let length = buf.len();
+        let length = buf.trim().len();
         let payload_end = 7+length;
         let end_end = payload_end+4;
-        msg[7..payload_end].copy_from_slice(buf.as_bytes());
+        msg[7..payload_end].copy_from_slice(buf.trim().as_bytes());
         msg[payload_end..end_end].copy_from_slice(&end_sequence);
 
         let _ = stream.write_all(&msg[0..end_end]);
@@ -142,6 +142,7 @@ fn handle_connection(mut stream: TcpStream, running: Arc<AtomicBool>) {
                     std::io::stdout().write_all(&data).unwrap();
                     std::io::stdout().flush().unwrap();
                     print!(">");std::io::stdout().flush().unwrap();
+                    message.clear();
 
                 }
 
