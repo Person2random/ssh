@@ -166,7 +166,7 @@ fn main() -> std::io::Result<()> {
         let running = Arc::new(AtomicBool::new(true));
         let reader = stream.try_clone()?; // for receiving
         let writer = stream.try_clone()?; // for sending
-        println!("New connection from-YA DOCTOR 5ALAS YA EB EL WES5A 55555555 {}", stream.peer_addr()?);
+        println!("New connection from {}", stream.peer_addr()?);
 
         let mut buf = String::new();
         let std_in = stdin();
